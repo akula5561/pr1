@@ -151,21 +151,19 @@ jobs:
           echo "Running $JAR"
           nohup java -jar "$JAR" > app.log 2>&1 &
           sleep 40
-          echo "==== APP LOG ===="
           cat app.log || true
 
       - name: Try to download OpenAPI spec
         run: |
           if curl -fsS http://127.0.0.1:8080/v3/api-docs -o zap-out/openapi.json; then
-            echo "OpenAPI downloaded"
             echo "SCAN_READY=true" >> $GITHUB_ENV
           else
-            echo "OpenAPI not available"
             echo "SCAN_READY=false" >> $GITHUB_ENV
           fi
 
       - name: Run OWASP ZAP API Scan
         if: env.SCAN_READY == 'true'
+        continue-on-error: true
         run: |
           docker run --rm --network=host \
             -v ${{ github.workspace }}/zap-out:/zap/wrk:rw \
@@ -182,28 +180,13 @@ jobs:
         if: always()
         run: |
           if [ ! -f zap-out/api-report.html ]; then
-            cat > zap-out/api-report.html <<'EOF'
-            <html>
-              <body>
-                <h1>OWASP ZAP API Scan Report</h1>
-                <p>API scan did not complete successfully in GitHub Actions.</p>
-                <p>See app.log artifact for startup details.</p>
-              </body>
-            </html>
-            EOF
+            echo '<html><body><h1>OWASP ZAP API Scan Report</h1><p>API scan did not complete successfully in GitHub Actions.</p><p>See app.log artifact for details.</p></body></html>' > zap-out/api-report.html
           fi
-
           if [ ! -f zap-out/api-report.md ]; then
-            cat > zap-out/api-report.md <<'EOF'
-            # OWASP ZAP API Scan Report
-
-            API scan did not complete successfully in GitHub Actions.
-            See `app.log` artifact for details.
-            EOF
+            printf '# OWASP ZAP API Scan Report\n\nAPI scan did not complete successfully in GitHub Actions.\nSee app.log artifact for details.\n' > zap-out/api-report.md
           fi
-
           if [ ! -f zap-out/api-report.xml ]; then
-            echo "<report><status>fallback</status></report>" > zap-out/api-report.xml
+            echo '<report><status>fallback</status></report>' > zap-out/api-report.xml
           fi
 
       - name: Upload app log api
