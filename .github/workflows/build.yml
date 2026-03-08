@@ -134,16 +134,37 @@ jobs:
 
       - name: Start application
         run: |
-          java -jar *.jar &
-          sleep 40
+          java -jar *.jar > app.log 2>&1 &
+          for i in {1..30}; do
+            if curl -fsS http://localhost:8080/ > /dev/null; then
+              echo "Application is up"
+              break
+            fi
+            echo "Waiting for application..."
+            sleep 2
+          done
+
+      - name: Download OpenAPI spec
+        run: |
+          curl -f http://localhost:8080/v3/api-docs -o openapi.json
+          ls -lh openapi.json
+          head -c 300 openapi.json || true
 
       - name: Run OWASP ZAP API Scan
         uses: zaproxy/action-api-scan@v0.10.0
         with:
-          target: "http://localhost:8080/v3/api-docs"
+          target: openapi.json
           format: openapi
-          rules_file_name: "zap-rules.tsv"
+          rules_file_name: zap-rules.tsv
           allow_issue_writing: false
+
+      - name: Upload app log
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-log
+          path: app.log
+          if-no-files-found: warn
 
       - name: Upload ZAP API report
         if: ${{ always() }}
@@ -153,4 +174,5 @@ jobs:
           path: |
             report_html.html
             report_md.md
+            openapi.json
           if-no-files-found: warn
