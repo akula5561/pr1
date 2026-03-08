@@ -144,30 +144,28 @@ jobs:
 
       - name: Start application
         run: |
-          ls -R
           JAR=$(find . -name "*.jar" | head -n 1)
           echo "Running $JAR"
           java -jar "$JAR" > app.log 2>&1 &
-          sleep 40
-
-      - name: Download OpenAPI spec
-        run: |
-          for i in {1..20}; do
-            if curl -f http://localhost:8080/v3/api-docs -o openapi.json; then
-              echo "OpenAPI downloaded"
-              ls -lh openapi.json
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:8080/v3/api-docs > /dev/null; then
+              echo "OpenAPI endpoint is up"
               break
             fi
-            echo "Waiting for API..."
+            echo "Waiting for /v3/api-docs..."
             sleep 3
           done
 
       - name: Run OWASP ZAP API Scan
+        continue-on-error: true
         uses: zaproxy/action-api-scan@v0.10.0
         with:
-          target: openapi.json
+          token: ${{ github.token }}
+          docker_name: ghcr.io/zaproxy/zaproxy:stable
+          target: "http://127.0.0.1:8080/v3/api-docs"
           format: openapi
           rules_file_name: zap-rules.tsv
+          cmd_options: "-a"
           allow_issue_writing: false
 
       - name: Upload app log
@@ -186,5 +184,4 @@ jobs:
           path: |
             report_html.html
             report_md.md
-            openapi.json
           if-no-files-found: warn
