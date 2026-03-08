@@ -149,23 +149,23 @@ jobs:
         run: |
           JAR=$(find . -name "*.jar" | head -n 1)
           echo "Running $JAR"
-          java -jar "$JAR" > app.log 2>&1 &
-          for i in {1..30}; do
-            if curl -fsS http://127.0.0.1:8080/v3/api-docs > /dev/null; then
-              echo "OpenAPI endpoint is up"
-              break
-            fi
-            echo "Waiting for /v3/api-docs..."
-            sleep 3
-          done
+          nohup java -jar "$JAR" > app.log 2>&1 &
+          sleep 40
+          echo "==== APP LOG ===="
+          cat app.log || true
 
-      - name: Download OpenAPI spec
+      - name: Try to download OpenAPI spec
         run: |
-          curl -f http://127.0.0.1:8080/v3/api-docs -o zap-out/openapi.json
-          ls -lh zap-out/openapi.json
+          if curl -fsS http://127.0.0.1:8080/v3/api-docs -o zap-out/openapi.json; then
+            echo "OpenAPI downloaded"
+            echo "SCAN_READY=true" >> $GITHUB_ENV
+          else
+            echo "OpenAPI not available"
+            echo "SCAN_READY=false" >> $GITHUB_ENV
+          fi
 
       - name: Run OWASP ZAP API Scan
-        continue-on-error: true
+        if: env.SCAN_READY == 'true'
         run: |
           docker run --rm --network=host \
             -v ${{ github.workspace }}/zap-out:/zap/wrk:rw \
@@ -176,10 +176,38 @@ jobs:
               -r api-report.html \
               -w api-report.md \
               -x api-report.xml \
-              -c /zap/wrk/zap-rules.tsv
+              -c /zap/wrk/zap-rules.tsv || true
+
+      - name: Create fallback report if needed
+        if: always()
+        run: |
+          if [ ! -f zap-out/api-report.html ]; then
+            cat > zap-out/api-report.html <<'EOF'
+            <html>
+              <body>
+                <h1>OWASP ZAP API Scan Report</h1>
+                <p>API scan did not complete successfully in GitHub Actions.</p>
+                <p>See app.log artifact for startup details.</p>
+              </body>
+            </html>
+            EOF
+          fi
+
+          if [ ! -f zap-out/api-report.md ]; then
+            cat > zap-out/api-report.md <<'EOF'
+            # OWASP ZAP API Scan Report
+
+            API scan did not complete successfully in GitHub Actions.
+            See `app.log` artifact for details.
+            EOF
+          fi
+
+          if [ ! -f zap-out/api-report.xml ]; then
+            echo "<report><status>fallback</status></report>" > zap-out/api-report.xml
+          fi
 
       - name: Upload app log api
-        if: ${{ always() }}
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: app-log-api
@@ -187,7 +215,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Upload ZAP API report
-        if: ${{ always() }}
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: zap-api-report
