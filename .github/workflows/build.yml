@@ -140,9 +140,9 @@ jobs:
       - name: Run OWASP ZAP API Scan
         uses: zaproxy/action-api-scan@v0.10.0
         with:
-          target: "http://localhost:8080/v3/api-docs"
-          rules_file_name: "zap-rules.tsv"
+          target: "http://localhost:8080"
           format: openapi
+          allow_issue_writing: false
 
       - name: Upload ZAP API report
         if: ${{ always() }}
