@@ -6,12 +6,24 @@ on:
       - main
 
 jobs:
-  build:
+  secrets:
     runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build:
+    needs: secrets
+    runs-on: ubuntu-latest
     container:
       image: eclipse-temurin:21
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -31,10 +43,8 @@ jobs:
   sast:
     needs: build
     runs-on: ubuntu-latest
-
     container:
       image: returntocorp/semgrep:latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -56,10 +66,8 @@ jobs:
   sca:
     needs: build
     runs-on: ubuntu-latest
-
     container:
       image: eclipse-temurin:21
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -82,7 +90,6 @@ jobs:
   dast-baseline:
     needs: build
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -130,7 +137,6 @@ jobs:
   dast-api:
     needs: build
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -180,10 +186,10 @@ jobs:
         if: always()
         run: |
           if [ ! -f zap-out/api-report.html ]; then
-            echo '<html><body><h1>OWASP ZAP API Scan Report</h1><p>API scan did not complete successfully in GitHub Actions.</p><p>See app.log artifact for details.</p></body></html>' > zap-out/api-report.html
+            echo '<html><body><h1>OWASP ZAP API Scan Report</h1><p>API scan did not complete successfully in GitHub Actions.</p></body></html>' > zap-out/api-report.html
           fi
           if [ ! -f zap-out/api-report.md ]; then
-            printf '# OWASP ZAP API Scan Report\n\nAPI scan did not complete successfully in GitHub Actions.\nSee app.log artifact for details.\n' > zap-out/api-report.md
+            printf '# OWASP ZAP API Scan Report\n\nAPI scan did not complete successfully.\n' > zap-out/api-report.md
           fi
           if [ ! -f zap-out/api-report.xml ]; then
             echo '<report><status>fallback</status></report>' > zap-out/api-report.xml
@@ -207,4 +213,78 @@ jobs:
             zap-out/api-report.md
             zap-out/api-report.xml
             zap-out/openapi.json
+          if-no-files-found: warn
+
+  fuzz:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download jar artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: jar-artifact
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Start application
+        run: |
+          JAR=$(find . -name "*.jar" | head -n 1)
+          java -jar "$JAR" > app.log 2>&1 &
+          sleep 40
+
+      - name: Install ffuf
+        run: |
+          wget -q https://github.com/ffuf/ffuf/releases/download/v2.1.0/ffuf_2.1.0_linux_amd64.tar.gz -O ffuf.tar.gz
+          tar -xzf ffuf.tar.gz
+          chmod +x ffuf
+
+      - name: Create wordlist
+        run: |
+          cat > wordlist.txt << 'EOF'
+          admin
+          api
+          login
+          logout
+          register
+          users
+          courses
+          students
+          actuator
+          health
+          info
+          metrics
+          env
+          config
+          debug
+          test
+          backup
+          h2-console
+          swagger-ui
+          v2
+          v3
+          api-docs
+          EOF
+
+      - name: Run ffuf fuzzing
+        run: |
+          ./ffuf \
+            -u http://localhost:8080/FUZZ \
+            -w wordlist.txt \
+            -mc 200,201,301,302,401,403 \
+            -o ffuf-report.json \
+            -of json || true
+
+      - name: Upload fuzzing report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ffuf-report
+          path: ffuf-report.json
           if-no-files-found: warn
