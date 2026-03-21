@@ -1,0 +1,290 @@
+name: Build project
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build:
+    needs: secrets
+    runs-on: ubuntu-latest
+    container:
+      image: eclipse-temurin:21
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set execute permission for mvnw
+        run: chmod +x mvnw
+
+      - name: Build, test and package
+        run: ./mvnw clean package
+
+      - name: Upload jar artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: jar-artifact
+          path: ./target/*.jar
+
+  sast:
+    needs: build
+    runs-on: ubuntu-latest
+    container:
+      image: returntocorp/semgrep:latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run Semgrep
+        run: semgrep --config=auto --sarif --output=semgrep.sarif .
+
+      - name: Upload SARIF report
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep.sarif
+
+      - name: Upload Semgrep artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-sarif
+          path: semgrep.sarif
+
+  sca:
+    needs: build
+    runs-on: ubuntu-latest
+    container:
+      image: eclipse-temurin:21
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set execute permission for mvnw
+        run: chmod +x mvnw
+
+      - name: Run OWASP Dependency Check
+        continue-on-error: true
+        run: ./mvnw org.owasp:dependency-check-maven:check
+
+      - name: Upload dependency check report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-check-report
+          path: target/dependency-check-report.html
+          if-no-files-found: warn
+
+  dast-baseline:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download jar artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: jar-artifact
+
+      - name: Prepare ZAP rules file
+        run: touch zap-rules.tsv
+
+      - name: Start application
+        run: |
+          JAR=$(find . -name "*.jar" | head -n 1)
+          echo "Running $JAR"
+          java -jar "$JAR" > app.log 2>&1 &
+          sleep 40
+
+      - name: Run OWASP ZAP Baseline Scan
+        continue-on-error: true
+        uses: zaproxy/action-baseline@v0.9.0
+        with:
+          target: "http://127.0.0.1:8080"
+          rules_file_name: "zap-rules.tsv"
+
+      - name: Upload app log baseline
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-log-baseline
+          path: app.log
+          if-no-files-found: warn
+
+      - name: Upload ZAP baseline report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-baseline-report
+          path: |
+            report_html.html
+            report_md.md
+          if-no-files-found: warn
+
+  dast-api:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download jar artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: jar-artifact
+
+      - name: Prepare workspace
+        run: |
+          mkdir -p zap-out
+          touch zap-rules.tsv
+
+      - name: Start application
+        run: |
+          JAR=$(find . -name "*.jar" | head -n 1)
+          echo "Running $JAR"
+          nohup java -jar "$JAR" > app.log 2>&1 &
+          sleep 40
+          cat app.log || true
+
+      - name: Try to download OpenAPI spec
+        run: |
+          if curl -fsS http://127.0.0.1:8080/v3/api-docs -o zap-out/openapi.json; then
+            echo "SCAN_READY=true" >> $GITHUB_ENV
+          else
+            echo "SCAN_READY=false" >> $GITHUB_ENV
+          fi
+
+      - name: Run OWASP ZAP API Scan
+        if: env.SCAN_READY == 'true'
+        continue-on-error: true
+        run: |
+          docker run --rm --network=host \
+            -v ${{ github.workspace }}/zap-out:/zap/wrk:rw \
+            ghcr.io/zaproxy/zaproxy:stable \
+            zap-api-scan.py \
+              -t /zap/wrk/openapi.json \
+              -f openapi \
+              -r api-report.html \
+              -w api-report.md \
+              -x api-report.xml \
+              -c /zap/wrk/zap-rules.tsv || true
+
+      - name: Create fallback report if needed
+        if: always()
+        run: |
+          if [ ! -f zap-out/api-report.html ]; then
+            echo '<html><body><h1>OWASP ZAP API Scan Report</h1><p>API scan did not complete successfully in GitHub Actions.</p></body></html>' > zap-out/api-report.html
+          fi
+          if [ ! -f zap-out/api-report.md ]; then
+            printf '# OWASP ZAP API Scan Report\n\nAPI scan did not complete successfully.\n' > zap-out/api-report.md
+          fi
+          if [ ! -f zap-out/api-report.xml ]; then
+            echo '<report><status>fallback</status></report>' > zap-out/api-report.xml
+          fi
+
+      - name: Upload app log api
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-log-api
+          path: app.log
+          if-no-files-found: warn
+
+      - name: Upload ZAP API report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-api-report
+          path: |
+            zap-out/api-report.html
+            zap-out/api-report.md
+            zap-out/api-report.xml
+            zap-out/openapi.json
+          if-no-files-found: warn
+
+  fuzz:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download jar artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: jar-artifact
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Start application
+        run: |
+          JAR=$(find . -name "*.jar" | head -n 1)
+          java -jar "$JAR" > app.log 2>&1 &
+          sleep 40
+
+      - name: Install ffuf
+        run: |
+          wget -q https://github.com/ffuf/ffuf/releases/download/v2.1.0/ffuf_2.1.0_linux_amd64.tar.gz -O ffuf.tar.gz
+          tar -xzf ffuf.tar.gz
+          chmod +x ffuf
+
+      - name: Create wordlist
+        run: |
+          cat > wordlist.txt << 'EOF'
+          admin
+          api
+          login
+          logout
+          register
+          users
+          courses
+          students
+          actuator
+          health
+          info
+          metrics
+          env
+          config
+          debug
+          test
+          backup
+          h2-console
+          swagger-ui
+          v2
+          v3
+          api-docs
+          EOF
+
+      - name: Run ffuf fuzzing
+        run: |
+          ./ffuf \
+            -u http://localhost:8080/FUZZ \
+            -w wordlist.txt \
+            -mc 200,201,301,302,401,403 \
+            -o ffuf-report.json \
+            -of json || true
+
+      - name: Upload fuzzing report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ffuf-report
+          path: ffuf-report.json
+          if-no-files-found: warn
